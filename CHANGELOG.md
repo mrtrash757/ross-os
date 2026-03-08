@@ -39,3 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **ross-os-attio-io** — Stub skill (pending Attio connector auth)
 - **ross-os-social-io** — X search, LinkedIn patterns, 7 Coda social tables, deletion policy
 - Sanitized all repo skill copies to use env var references instead of hardcoded tokens
+- **ross-os-morning-brief** — Cross-stack morning briefing (calendar, tasks, habits, contacts, social, intel)
+- **ross-os-eod-debrief** — End-of-day summary with Day row logging and Supabase sync
+- **ross-os-stale-radar** — Overdue contact detection with tiered urgency and outreach drafting
+- **ross-os-fire-scan** — Rapid cross-stack triage (8 checks: tasks, email tasks, contacts, mentions, intel, agent health, cleanup queue)
