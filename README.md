@@ -24,8 +24,8 @@ ross-os/
 
 ## Build Order
 
-1. ✅ Phase 1 — Coda Base (21 tables, 7 pages, sample data)
-2. 🔧 Phase 2 — Integrations/Infra (Supabase, Netlify, Git)
+1. ✅ Phase 1 — Coda Base (21 tables, 7 pages, sample data, column fixes)
+2. ✅ Phase 2 — Integrations/Infra (Supabase, Git, Netlify, Todoist, OneCal)
 3. ⬜ Phase 3 — Agent Architecture
 4. ⬜ Phase 4 — Automations
 5. ⬜ Phase 5 — Fun Stuff
