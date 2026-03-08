@@ -20,7 +20,7 @@ Load this skill when you need to:
 ## Credentials
 
 - **Doc ID:** `nSMMjxb_b2`
-- **API Token:** `f8b53a89-6376-486e-85d8-f59fffed59d1` (scoped to this doc only)
+- **API Token:** `${CODA_API_TOKEN}` (scoped to this doc only)
 - **Base URL:** `https://coda.io/apis/v1/docs/nSMMjxb_b2`
 - **Doc URL:** https://coda.io/d/_dnSMMjxb_b2/RossOS_suRY7HB2
 
@@ -28,25 +28,25 @@ Load this skill when you need to:
 
 All calls use `curl` or `fetch` with the auth header:
 ```
-Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1
+Authorization: Bearer ${CODA_API_TOKEN}
 ```
 
 ### List rows (with column names)
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/{TABLE_ID}/rows?useColumnNames=true&limit=100" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 
 ### Get a single row
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/{TABLE_ID}/rows/{ROW_ID}" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 
 ### Upsert rows (create or update)
 ```bash
 curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/{TABLE_ID}/rows" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1" \
+  -H "Authorization: Bearer ${CODA_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "rows": [
@@ -64,13 +64,13 @@ Use `keyColumns` for upsert behavior (match on that column, update if exists, cr
 ### Filter rows
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/{TABLE_ID}/rows?useColumnNames=true&query=ColumnName:value" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 
 ### Delete a row
 ```bash
 curl -s -X DELETE "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/{TABLE_ID}/rows/{ROW_ID}" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 
 ## Rate Limits
@@ -416,27 +416,27 @@ ID: `grid-czCy9mvHAb`
 ### Get today's Day row
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-Zm8ylxf9zc/rows?useColumnNames=true&query=Date:$(date +%Y-%m-%d)" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 
 ### Get open tasks (Status != Done, != Dropped)
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-G1O2W471aC/rows?useColumnNames=true" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 Then filter client-side for Status not in [Done, Dropped].
 
 ### Get stale contacts (high importance, overdue cadence)
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-1M2UOaliIC/rows?useColumnNames=true" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+  -H "Authorization: Bearer ${CODA_API_TOKEN}"
 ```
 Then filter where Importance = High and Next touch date <= today.
 
 ### Create a new task
 ```bash
 curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-G1O2W471aC/rows" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1" \
+  -H "Authorization: Bearer ${CODA_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "rows": [{
@@ -455,7 +455,7 @@ curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-G1O2W471aC/
 ### Log an interaction
 ```bash
 curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-bDW7PytKOq/rows" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1" \
+  -H "Authorization: Bearer ${CODA_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "rows": [{
