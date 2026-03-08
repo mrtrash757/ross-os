@@ -3,7 +3,7 @@ name: ross-os-email-monitor
 description: Email intelligence agent for Ross OS. Reads from Coda Gmail Pack sync table (Messages), classifies emails by priority and intent, cross-references Contacts for VIP matching, creates Email-linked Tasks for action items, detects newsletters for unsubscribe candidates, and surfaces stale comms. Runs hourly via cron. Use when the hourly email monitor fires or Ross says "check my email."
 metadata:
   author: ross-os
-  version: '2.1'
+  version: '2.2'
   category: automation
 ---
 
@@ -301,6 +301,47 @@ curl -s -X PATCH "${SUPABASE_URL}/rest/v1/agent_logs?id=eq.${LOG_ID}" \
 [X] high priority: [brief list]. [Y] tasks created. [Z] newsletters flagged."
 ```
 
+## Additional Intelligence (included in notification when relevant)
+
+### Response Queue
+
+After classification, build a response queue of emails that need Ross's reply. Include in the notification if any exist.
+
+Criteria (must pass ALL):
+1. Not from Ross himself
+2. Not a known newsletter, low sender, marketing, or promo email
+3. Has at least one signal:
+   - Superhuman `Respond` label (urgency = high if still UNREAD)
+   - Question mark in subject (only if UNREAD)
+   - Action language in body: "can you", "could you", "please", "your thoughts", etc. (only if UNREAD)
+
+Format in notification:
+```
+RESPONSE NEEDED:
+• [Sender] → [Subject] ([Account]) — [signal]
+```
+
+### Newsletter Kill List
+
+Track newsletter senders detected during classification. Detection methods:
+- Known newsletter sender (from settings)
+- Superhuman Marketing label
+- CATEGORY_PROMOTIONS Gmail label
+- "unsubscribe" / "opt out" in body text
+- Superhuman News label
+
+If new newsletter senders are detected that are NOT in `email_newsletter_senders` settings, flag them in the notification so Ross can add them or the agent can auto-add.
+
+### Stale Comms Detection
+
+Cross-reference the Contacts table against email activity:
+1. For each contact with a Cadence value, check when the last email was sent/received
+2. Also check the Interactions table for last recorded interaction
+3. If `days_since_last_contact > cadence_days`, flag as stale
+4. If no email or interaction found at all, flag as "never contacted"
+
+Include in notification only if stale High-importance contacts are found.
+
 ## Superhuman Label Intelligence
 
 The Gmail Pack brings through Superhuman's AI labels. Leverage these as a first-pass signal:
@@ -323,6 +364,18 @@ These labels augment (not replace) our own classification. If Superhuman says "R
 - No unread emails → Log success with 0 processed, exit silently
 - Classification uncertain → Default to Medium priority, FYI intent (conservative)
 - Contact lookup fails → Still classify without VIP boosting
+
+## Superhuman Split Inbox Recommendations
+
+When running a full analysis (not the hourly cron — only when Ross asks to "review inbox" or "optimize inbox"), generate Superhuman split inbox / Gmail filter suggestions:
+
+1. **High-volume sender splits**: Any sender with 3+ emails should get their own split
+   - Enilria → "Aviation Intel" split
+   - Salesforce Partner Community → "Digests" split
+2. **Category-based auto-labels**: CATEGORY_PROMOTIONS → Skip inbox, label Promo
+3. **Service notifications**: Reminder, Attio, Supabase, etc. → "Tools/Services" label, skip inbox
+
+These are suggestions only — present to Ross for manual application in Superhuman settings.
 
 ## Scheduling
 
