@@ -1,14 +1,13 @@
 ---
 name: ross-os-email-monitor
-description: Automated email monitoring agent for Ross OS. Use this skill on an hourly schedule to classify new emails, suggest replies, and create tasks from action items. Runs independently from the Email Daily Brief — this is the real-time classifier, while the brief is the morning summary. Reads Gmail, classifies intent and priority, writes Email-linked Tasks to Coda, and flags items needing attention.
+description: Email intelligence agent for Ross OS. Reads from Coda Gmail Pack sync table (Messages), classifies emails by priority and intent, cross-references Contacts for VIP matching, creates Email-linked Tasks for action items, detects newsletters for unsubscribe candidates, and surfaces stale comms. Runs hourly via cron. Use when the hourly email monitor fires or Ross says "check my email."
 metadata:
   author: ross-os
-  version: '1.0'
+  version: '2.0'
   category: automation
-  depends-on: ross-os-email-io ross-os-coda-io ross-os-task-creator ross-os-settings-io ross-os-supabase-io ross-os-enhanced-logging
 ---
 
-# Ross OS — Email Monitor
+# Ross OS — Email Monitor v2
 
 ## When to Use This Skill
 
@@ -19,38 +18,46 @@ Load this skill when:
 
 ## Overview
 
-The Email Monitor is the real-time email processing agent. It:
-1. Scans for new/unread emails since the last check
-2. Classifies each email (intent, priority, sender importance)
-3. Creates Email-linked Tasks in Coda for action items
-4. Suggests reply drafts for high-priority messages
-5. Sends a notification only if there are high-priority items
+The Email Monitor reads from the Coda Gmail Pack sync table (Messages), which syncs all 4 Gmail accounts automatically. It:
+1. Reads new/unread emails from the Coda Messages table
+2. Cross-references senders against the Contacts table for VIP matching
+3. Classifies each email (priority, intent)
+4. Creates Email-linked Tasks in Coda for action items
+5. Flags unsubscribe candidates
+6. Sends a notification only if there are high-priority items
 
 It does NOT send replies automatically — it surfaces and suggests.
 
-## Credentials & Config
+## Data Sources
 
-- **Gmail connector:** source_id `gcal`
-- **Ross's email:** `ross@trashpanda.capital`
-- **Coda Doc ID:** `nSMMjxb_b2`
-- **Coda API Token:** `${CODA_API_TOKEN}`
-- **Email-linked Tasks Table:** `grid-7IWNsZiHzE`
-- **Contacts Table:** `grid-1M2UOaliIC`
-- **Settings Table:** `grid-ybi2tIogls`
-- **Supabase URL:** `https://fpuhaetqfohxtzhfrmpl.supabase.co`
-- **Supabase Key:** `${SUPABASE_SERVICE_ROLE_KEY}`
+All data lives in Coda doc `nSMMjxb_b2`.
+
+| Table | Grid ID | Purpose |
+|-------|---------|---------|
+| Messages (Gmail Pack) | grid-sync-1004-Email | Source — synced emails from all 4 accounts |
+| Contacts | grid-1M2UOaliIC | VIP matching by sender name/email |
+| Email-linked Tasks | grid-7IWNsZiHzE | Destination — tasks created from emails |
+| Settings | grid-ybi2tIogls | Config (email_monitor_enabled, quiet hours) |
+
+**Coda API Token:** `f8b53a89-6376-486e-85d8-f59fffed59d1`
+
+**Gmail accounts synced:**
+- ross@trashpanda.capital (Workspace — TPC)
+- ross@asteriaair.com (Workspace — Asteria Air)
+- ross@asteria.partners (Workspace — Asteria Partners)
+- ross.kinkade@gmail.com (Personal)
 
 ## Instructions
 
-### Step 0: Pre-flight Checks
+### Step 0: Pre-flight
 
-1. Load `ross-os-settings-io`. Check `email_monitor_enabled`. If `false`, exit silently.
-2. Check `quiet_hours_start` and `quiet_hours_end`. If currently in quiet hours, still process but do NOT send notifications.
+1. Check Settings table for `email_monitor_enabled`. If `false`, exit silently.
+2. Check `quiet_hours_start` and `quiet_hours_end`. If currently in quiet hours (ET), still process but do NOT send notifications.
 3. Log run start to Supabase `agent_logs`:
 
 ```bash
 SUPABASE_URL="https://fpuhaetqfohxtzhfrmpl.supabase.co"
-SUPABASE_KEY="${SUPABASE_SERVICE_ROLE_KEY}"
+SUPABASE_KEY="${SUPABASE_SERVICE_ROLE_KEY}"  # Retrieve from Supabase Vault
 
 LOG_RESPONSE=$(curl -s -X POST "${SUPABASE_URL}/rest/v1/agent_logs" \
   -H "apikey: ${SUPABASE_KEY}" \
@@ -62,137 +69,147 @@ LOG_RESPONSE=$(curl -s -X POST "${SUPABASE_URL}/rest/v1/agent_logs" \
 LOG_ID=$(echo "$LOG_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
 ```
 
-### Step 1: Fetch New Emails
+### Step 1: Fetch Unread Emails from Coda
 
-Search for unread inbox emails from the last 2 hours (overlapping window to avoid missing anything):
+Read the Messages table, filtering for UNREAD emails:
 
-```json
-{
-  "tool_name": "search_email",
-  "source_id": "gcal",
-  "arguments": {
-    "queries": ["is:unread in:inbox"]
-  }
-}
+```bash
+curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-sync-1004-Email/rows?useColumnNames=true&limit=200" \
+  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
 ```
 
-Also fetch recent emails in case some were read but not processed:
+Filter results in code: only process rows where `Labels` contains `UNREAD`.
 
-```json
-{
-  "tool_name": "search_email",
-  "source_id": "gcal",
-  "arguments": {
-    "queries": ["in:inbox after:TWO_HOURS_AGO_ISO"]
-  }
-}
-```
+Available columns per email row:
+- `From` — sender name
+- `To` — recipient name
+- `Subject` — email subject
+- `Date` — ISO timestamp
+- `Text` — email body (may be HTML)
+- `Labels` — comma-separated Gmail labels (includes Superhuman AI labels)
+- `Link` — direct Gmail URL
+- `Sync account` — which of the 4 accounts this came from
+- `Id` — Gmail message ID
+- `Thread` — thread subject
+- `Cc`, `Bcc` — if present
 
-Deduplicate by message/thread ID.
-
-### Step 2: Load Contact VIP List
+### Step 2: Load Contacts for VIP Matching
 
 ```bash
 curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-1M2UOaliIC/rows?useColumnNames=true&limit=500" \
-  -H "Authorization: Bearer ${CODA_API_TOKEN}"
+  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
 ```
 
-Build a lookup: `{email_address: {name, importance, company}}`.
+Build a lookup by name (fuzzy) and org. Contacts have: Name, Org, Role, Importance (High/Med/Low), Context tags, Channels, Cadence.
 
 ### Step 3: Classify Each Email
 
-For each email, determine:
+For each unread email, determine:
 
 #### Priority (High / Medium / Low)
 
 **High:**
 - From a contact with Importance = High
+- Superhuman label `[Superhuman]/AI/Respond` or `[Superhuman]/AI/Waiting`
 - Contains urgent language: "ASAP", "urgent", "deadline today", "by EOD"
-- Direct reply to something Ross sent with a question
-- Involves legal/financial terms: "contract", "term sheet", "wire", "sign"
-- From a domain associated with active deals
+- Direct reply to something Ross sent (check if thread contains Ross's sent messages)
+- Involves legal/financial terms: "contract", "term sheet", "wire", "sign", "invoice"
+- From a domain associated with active deals (asteriaair.com, asteria.partners senders)
 
 **Medium:**
-- From a known contact
+- From a known contact (any importance level)
+- Superhuman label `[Superhuman]/AI/Meeting`
 - Professional/business context
 - Contains a question or request
-- Meeting-related
+- Meeting-related (calendar invite acceptances, scheduling)
 
 **Low:**
-- Newsletters (has unsubscribe link)
-- Automated notifications (noreply@, no-reply@)
-- Marketing emails
-- CC'd but not directly TO ross@trashpanda.capital
-- GitHub/Netlify/Stripe/service notifications
+- Superhuman label `[Superhuman]/AI/Marketing` or `[Superhuman]/AI/News`
+- Has unsubscribe indicators in body (look for "unsubscribe", "opt out", "email preferences")
+- Automated notifications (noreply@, no-reply@, notifications@)
+- Label contains `CATEGORY_PROMOTIONS` or `CATEGORY_SOCIAL`
+- CC'd but not directly TO one of Ross's accounts
+- Service notifications (GitHub, Netlify, Stripe, Supabase, Coda, etc.)
 
 #### Intent Classification
 
 | Intent | Description | Action |
 |--------|-------------|--------|
 | `action_required` | Explicit task or deliverable needed | Create Email-linked Task |
-| `reply_needed` | Question asked, awaiting Ross's input | Create task + draft reply |
-| `scheduling` | Meeting request, availability | Flag for calendar check |
+| `reply_needed` | Question asked, awaiting Ross's input | Create task + note "reply needed" |
+| `scheduling` | Meeting request, availability, calendar invite | Flag for calendar check |
 | `fyi` | Status update, no action needed | Log only |
-| `newsletter` | Subscription/marketing | Skip |
+| `newsletter` | Subscription/marketing content | Flag as unsubscribe candidate |
 | `notification` | Automated service alert | Skip unless error/critical |
 
-### Step 4: Create Tasks for Action Items
+### Step 4: Check for Duplicates
 
-For emails classified as `action_required` or `reply_needed`, load `ross-os-task-creator` and create Email-linked Tasks:
+Before creating tasks, check existing Email-linked Tasks to avoid duplicates:
+
+```bash
+curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/rows?useColumnNames=true&limit=200" \
+  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1"
+```
+
+Skip task creation if a row already exists with the same `Thread ID link` or matching subject/sender.
+
+### Step 5: Create Email-linked Tasks
+
+For emails classified as `action_required` or `reply_needed`:
 
 ```bash
 curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/rows" \
-  -H "Authorization: Bearer ${CODA_API_TOKEN}" \
+  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1" \
   -H "Content-Type: application/json" \
   -d '{
     "rows": [{
       "cells": [
-        {"column": "Name", "value": "Reply to [Sender] re: [Subject summary]"},
-        {"column": "Source", "value": "Gmail"},
+        {"column": "Name", "value": "[ACTION] Reply to [Sender] re: [Subject summary]"},
+        {"column": "Source", "value": "Email Monitor"},
         {"column": "Due date", "value": "INFERRED_DUE_DATE"},
-        {"column": "Notes", "value": "Email summary: [1-2 sentence summary]. Classified as [intent], [priority] priority."},
-        {"column": "Context", "value": "Auto-classified by email-monitor"},
-        {"column": "Email account", "value": "ross@trashpanda.capital"},
-        {"column": "Thread ID link", "value": "GMAIL_THREAD_URL"},
-        {"column": "Contact", "value": "SENDER_NAME"}
+        {"column": "Notes", "value": "From: [sender] via [account]\nPriority: [HIGH/MED]\nIntent: [intent]\n\nSummary: [1-2 sentence summary]\n\nSuggested reply: [draft if reply_needed]"},
+        {"column": "Status", "value": "New"},
+        {"column": "Context", "value": "Auto-classified by email-monitor v2"},
+        {"column": "Email account", "value": "[sync_account]"},
+        {"column": "Thread ID link", "value": "[gmail_link]"},
+        {"column": "Contact", "value": "[matched_contact_name or sender]"}
       ]
     }]
   }'
 ```
 
 **Due date inference:**
-- If email mentions a specific date → use that date
-- If "by EOD" / "today" → today
-- If "by Friday" / "this week" → that Friday
-- If "ASAP" → today
-- If no deadline mentioned → tomorrow (default for action items)
+- Mentions specific date → use that date
+- "by EOD" / "today" / "ASAP" → today
+- "by Friday" / "this week" → that Friday
+- "next week" → next Monday
+- No deadline mentioned → tomorrow (default for action items)
 
-### Step 5: Draft Reply Suggestions
+**Task name prefixes:**
+- `[ACTION]` for action_required
+- `[REPLY]` for reply_needed
+- `[SCHEDULE]` for scheduling
 
-For `reply_needed` emails from High or Medium priority senders, draft a suggested reply:
-
-- Keep Ross's voice: direct, professional, not overly formal
-- Address the specific question or request
-- If scheduling, suggest checking calendar
-- Store the draft in the task Notes field: `"Suggested reply: [draft]"`
-
-Do NOT send any replies. Only suggest.
-
-### Step 6: Compose Notification (if needed)
+### Step 6: Build Notification (if needed)
 
 Only notify if there are High-priority items. Respect quiet hours.
 
+Format:
 ```
 Title: "[N] emails need attention"
 Body:
-High Priority:
-- [Sender] — [Subject] (Action Required)
-  [1-line summary]
+📬 Email Monitor — [timestamp]
 
-- [Sender] — [Subject] (Reply Needed)
-  [1-line summary]
+HIGH PRIORITY:
+• [Sender] → [Subject] ([Account])
+  [1-line summary] — [Intent]
 
-[N] tasks created in Email-linked Tasks.
+• [Sender] → [Subject] ([Account])
+  [1-line summary] — [Intent]
+
+TASKS CREATED: [N]
+NEWSLETTERS FLAGGED: [N]
+TOTAL PROCESSED: [N] across [accounts]
 ```
 
 If no high-priority items, end silently (no notification).
@@ -207,15 +224,16 @@ curl -s -X PATCH "${SUPABASE_URL}/rest/v1/agent_logs?id=eq.${LOG_ID}" \
   -d "{
     \"status\": \"success\",
     \"completed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-    \"summary\": \"Processed N emails: X high priority, Y tasks created\",
+    \"summary\": \"Processed N emails: X high, Y medium, Z low. T tasks created.\",
     \"detail\": {
-      \"total_processed\": 12,
-      \"high_priority\": 2,
-      \"medium_priority\": 4,
-      \"low_priority\": 6,
-      \"tasks_created\": 3,
-      \"reply_drafts\": 1,
-      \"newsletters_skipped\": 3
+      \"total_processed\": 0,
+      \"by_account\": {\"trashpanda\": 0, \"asteriaair\": 0, \"partners\": 0, \"personal\": 0},
+      \"high_priority\": 0,
+      \"medium_priority\": 0,
+      \"low_priority\": 0,
+      \"tasks_created\": 0,
+      \"newsletters_flagged\": 0,
+      \"intents\": {\"action_required\": 0, \"reply_needed\": 0, \"scheduling\": 0, \"fyi\": 0, \"newsletter\": 0, \"notification\": 0}
     }
   }"
 ```
@@ -223,48 +241,43 @@ curl -s -X PATCH "${SUPABASE_URL}/rest/v1/agent_logs?id=eq.${LOG_ID}" \
 ### Step 8: Store Memory Entry
 
 ```
-"Ross OS: Email monitor ran at [time]. Processed [N] emails. 
-[X] high priority: [brief list]. [Y] tasks created."
+"Ross OS: Email monitor ran at [time]. Processed [N] emails across [accounts].
+[X] high priority: [brief list]. [Y] tasks created. [Z] newsletters flagged."
 ```
 
-## Deduplication Strategy
+## Superhuman Label Intelligence
 
-The monitor runs hourly with a 2-hour lookback window. To avoid creating duplicate tasks:
+The Gmail Pack brings through Superhuman's AI labels. Leverage these as a first-pass signal:
 
-1. Before creating an Email-linked Task, check if one already exists for the same thread:
-```bash
-curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/rows?useColumnNames=true" \
-  -H "Authorization: Bearer ${CODA_API_TOKEN}"
-```
-2. Search for matching Thread ID link or similar Name
-3. If found with Status not Done, skip creation
+| Superhuman Label | Meaning | Our Mapping |
+|---|---|---|
+| `[Superhuman]/AI/Respond` | Needs a reply | → reply_needed, boost to High |
+| `[Superhuman]/AI/Waiting` | Waiting for someone else | → fyi (unless overdue) |
+| `[Superhuman]/AI/Meeting` | Meeting-related | → scheduling, Medium |
+| `[Superhuman]/AI/Marketing` | Marketing/promo | → newsletter, Low |
+| `[Superhuman]/AI/News` | News/updates | → fyi, Low |
+| `[Superhuman]/ru` | Read/unimportant | → fyi, Low |
+
+These labels augment (not replace) our own classification. If Superhuman says "Respond" but our rules say "Low", boost to Medium minimum.
+
+## Error Handling
+
+- Coda sync table empty → Log warning, exit gracefully, no notification
+- Coda API rate limited → Wait 10s, retry once, then log partial
+- No unread emails → Log success with 0 processed, exit silently
+- Classification uncertain → Default to Medium priority, FYI intent (conservative)
+- Contact lookup fails → Still classify without VIP boosting
 
 ## Scheduling
 
-The Email Monitor should be scheduled as a Computer cron:
-
-- **Frequency:** Every hour (per Settings: `email_monitor_interval_hours = 1`)
-- **Cron expression (UTC):** `0 * * * *` (top of every hour)
-- **Background:** `true` (self-contained, no conversation context needed)
-
-To set up:
+Cron: hourly, background=true
 ```
 schedule_cron(
   action="create",
   name="Email Monitor",
-  cron="0 * * * *",
+  cron="26 * * * *",
   task="Load the ross-os-email-monitor skill and execute it.",
   background=true,
   exact=false
 )
 ```
-
-**Important:** Do not schedule until Ross enables `email_monitor_enabled` in Settings.
-
-## Error Handling
-
-- Gmail connector unavailable → Log error, exit gracefully, do not notify
-- Coda API rate limited → Wait 10s, retry once, then log partial
-- No new emails → Log success with 0 processed, exit silently (no notification)
-- Classification uncertain → Default to Medium priority, FYI intent (conservative)
-- Contact lookup fails → Still classify but without VIP boosting
