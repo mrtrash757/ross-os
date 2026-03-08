@@ -175,16 +175,37 @@ curl -s -X POST "${SUPABASE_URL}/rest/v1/days_history" \
   }]'
 ```
 
-### Step 7: Deliver the debrief
+### Step 7: Voice drift check
+
+Load `ross-os-voice-drift` and execute it. This step:
+1. Checks if `voice_drift_enabled` is true in Settings
+2. Pulls today's X posts via `search_social`
+3. Compares against the trained voice profile in Coda (Social Platforms → X)
+4. If drift detected, appends a **Voice Drift** section to the debrief
+
+If the drift check is skipped (disabled, insufficient posts, or error), continue without it — never let voice drift block the debrief.
+
+If drift IS detected, add this section to the debrief:
+
+```
+### Voice Drift
+- Overall: {minor|significant}
+- {dimension}: {current} vs baseline {baseline} ({direction})
+- Action: Review proposed profile update
+```
+
+If drift is `significant`, also send a separate notification with the full drift report so Ross can approve/dismiss changes.
+
+### Step 8: Deliver the debrief
 
 - **If triggered by cron:** Send as notification
 - **If triggered manually:** Return as response
 
-### Step 8: Log the run (complete)
+### Step 9: Log the run (complete)
 
 PATCH the agent_logs row with status, summary, and detail.
 
-### Step 9: Store memory
+### Step 10: Store memory
 
 ```
 "Ross OS: Ran eod-debrief at {TODAY} {TIME}. 
