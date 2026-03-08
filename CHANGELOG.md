@@ -43,3 +43,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **ross-os-eod-debrief** — End-of-day summary with Day row logging and Supabase sync
 - **ross-os-stale-radar** — Overdue contact detection with tiered urgency and outreach drafting
 - **ross-os-fire-scan** — Rapid cross-stack triage (8 checks: tasks, email tasks, contacts, mentions, intel, agent health, cleanup queue)
+- **Settings table** — New Coda table (grid-ybi2tIogls) with 20 config rows: schedules, skill toggles, thresholds, notifications, system
+- **ross-os-settings-io** — IO skill for reading/writing settings at runtime
+- **Morning Brief** scheduled at 6:30am ET daily
+- **EOD Debrief** scheduled at 11:00pm ET daily
