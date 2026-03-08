@@ -3,7 +3,7 @@ name: ross-os-email-monitor
 description: Email intelligence agent for Ross OS. Reads from Coda Gmail Pack sync table (Messages), classifies emails by priority and intent, cross-references Contacts for VIP matching, creates Email-linked Tasks for action items, detects newsletters for unsubscribe candidates, and surfaces stale comms. Runs hourly via cron. Use when the hourly email monitor fires or Ross says "check my email."
 metadata:
   author: ross-os
-  version: '2.0'
+  version: '2.1'
   category: automation
 ---
 
@@ -102,36 +102,80 @@ curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-1M2UOaliIC/rows?use
 
 Build a lookup by name (fuzzy) and org. Contacts have: Name, Org, Role, Importance (High/Med/Low), Context tags, Channels, Cadence.
 
-### Step 3: Classify Each Email
+### Step 3: Load Settings for Classification
 
-For each unread email, determine:
+Fetch all rows from the Settings table (`grid-ybi2tIogls`). Build a lookup dict by Key → Value.
 
-#### Priority (High / Medium / Low)
+The following settings drive classification (all are comma-separated lists):
 
-**High:**
-- From a contact with Importance = High
-- Superhuman label `[Superhuman]/AI/Respond` or `[Superhuman]/AI/Waiting`
-- Contains urgent language: "ASAP", "urgent", "deadline today", "by EOD"
-- Direct reply to something Ross sent (check if thread contains Ross's sent messages)
-- Involves legal/financial terms: "contract", "term sheet", "wire", "sign", "invoice"
-- From a domain associated with active deals (asteriaair.com, asteria.partners senders)
+| Setting Key | Common Name | Purpose |
+|------------|-------------|----------|
+| `email_high_senders` | Email: High Priority Senders | Always classify as High (e.g. "enilria, mathea head") |
+| `email_low_senders` | Email: Low Priority Senders | Always classify as Low/notification (e.g. "noreply, github, google security") |
+| `email_newsletter_senders` | Email: Newsletter Senders | Always classify as Low/newsletter (e.g. "controller, history facts") |
+| `email_high_domains` | Email: High Priority Domains | Boost emails from these domains |
+| `email_urgent_keywords` | Email: Urgent Keywords | Boost to High if found in subject+body |
+| `email_legal_finance_keywords` | Email: Legal/Finance Keywords | Boost to High — use PHRASE matching |
+| `email_digest_senders` | Email: Digest Senders | Classify as Medium/fyi (e.g. "salesforce, tastytrade") |
+| `email_skip_task_intents` | Email: Skip Task Intents | Don't create tasks for these intents (e.g. "fyi, newsletter, notification") |
+| `email_max_tasks_per_run` | Email: Max Tasks Per Run | Cap on tasks created per run (default 10) |
 
-**Medium:**
-- From a known contact (any importance level)
-- Superhuman label `[Superhuman]/AI/Meeting`
-- Professional/business context
-- Contains a question or request
-- Meeting-related (calendar invite acceptances, scheduling)
+**Parse each as a lowercase CSV list:**
+```python
+def csv_list(key):
+    return [x.strip().lower() for x in settings.get(key, "").split(",") if x.strip()]
+```
 
-**Low:**
-- Superhuman label `[Superhuman]/AI/Marketing` or `[Superhuman]/AI/News`
-- Has unsubscribe indicators in body (look for "unsubscribe", "opt out", "email preferences")
-- Automated notifications (noreply@, no-reply@, notifications@)
-- Label contains `CATEGORY_PROMOTIONS` or `CATEGORY_SOCIAL`
-- CC'd but not directly TO one of Ross's accounts
-- Service notifications (GitHub, Netlify, Stripe, Supabase, Coda, etc.)
+### Step 4: Classify Each Email
 
-#### Intent Classification
+For each unread email, apply this classification cascade:
+
+#### 4a. Build matching strings
+```python
+sender_lower = sender.lower()
+text_lower = (subject + " " + body[:500]).lower()
+sender_subject_lower = (sender_lower + " " + subject.lower()).strip()
+```
+
+#### 4b. Check newsletters and low senders FIRST (before any boosting)
+```python
+# Newsletter senders → Low/newsletter
+is_known_newsletter = any(ns in sender_lower for ns in NEWSLETTER_SENDERS)
+
+# Low senders → Low/notification  
+# Match against sender alone, OR sender+subject for multi-word patterns
+# e.g. "google security" matches sender "Google" + subject "Security alert"
+is_known_low = any(ls in sender_lower for ls in LOW_SENDERS) or \
+               any(ls in sender_subject_lower for ls in LOW_SENDERS if len(ls.split()) > 1)
+
+# Superhuman Marketing label (if not also marked Respond)
+if is_known_newsletter or (sh_marketing and not sh_respond):
+    priority = "Low"; intent = "newsletter"
+elif is_known_low:
+    priority = "Low"; intent = "notification"
+```
+
+#### 4c. High priority signals (only if NOT already classified as newsletter/low)
+1. Settings-driven high senders → High
+2. VIP contacts (Importance=High in Contacts table) → High  
+3. Known contacts (any importance) → Medium minimum
+4. Superhuman `Respond` label → High / reply_needed
+5. Urgent keywords match → High
+6. Legal/finance keyword PHRASE match → High
+7. Superhuman `Meeting` label → scheduling intent, Medium minimum
+8. Superhuman `News` label → Low (only if no other high signal)
+9. `CATEGORY_PROMOTIONS` → Low/newsletter (if not High)
+
+#### 4d. Detect unsubscribe indicators
+If body contains "unsubscribe" → flag `is_newsletter = True` (for unsub tracking)
+
+#### 4e. Refine intent for High priority
+If classified High but intent is still "fyi":
+- Action words ("please", "can you", "need you to") → `action_required`
+- Question marks or opinion requests → `reply_needed`
+- Otherwise keep as `fyi` (informational high-priority, like Enilria reports)
+
+#### Intent Reference
 
 | Intent | Description | Action |
 |--------|-------------|--------|
@@ -142,7 +186,7 @@ For each unread email, determine:
 | `newsletter` | Subscription/marketing content | Flag as unsubscribe candidate |
 | `notification` | Automated service alert | Skip unless error/critical |
 
-### Step 4: Check for Duplicates
+### Step 5: Check for Duplicates
 
 Before creating tasks, check existing Email-linked Tasks to avoid duplicates:
 
@@ -153,30 +197,45 @@ curl -s "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/rows?use
 
 Skip task creation if a row already exists with the same `Thread ID link` or matching subject/sender.
 
-### Step 5: Create Email-linked Tasks
+### Step 6: Create Email-linked Tasks
 
-For emails classified as `action_required` or `reply_needed`:
+For emails where `needs_task = True` (intent NOT in `email_skip_task_intents` AND no duplicate in existing tasks), create a row in the Email-linked Tasks table.
 
-```bash
-curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/rows" \
-  -H "Authorization: Bearer f8b53a89-6376-486e-85d8-f59fffed59d1" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "rows": [{
-      "cells": [
-        {"column": "Name", "value": "[ACTION] Reply to [Sender] re: [Subject summary]"},
-        {"column": "Source", "value": "Email Monitor"},
-        {"column": "Due date", "value": "INFERRED_DUE_DATE"},
-        {"column": "Notes", "value": "From: [sender] via [account]\nPriority: [HIGH/MED]\nIntent: [intent]\n\nSummary: [1-2 sentence summary]\n\nSuggested reply: [draft if reply_needed]"},
-        {"column": "Status", "value": "New"},
-        {"column": "Context", "value": "Auto-classified by email-monitor v2"},
-        {"column": "Email account", "value": "[sync_account]"},
-        {"column": "Thread ID link", "value": "[gmail_link]"},
-        {"column": "Contact", "value": "[matched_contact_name or sender]"}
-      ]
-    }]
-  }'
+**Account → Context mapping:**
+```python
+account_to_context = {
+    "ross@asteriaair.com": "Asteria Air",
+    "ross@asteria.partners": "Asteria Partners",
+    "ross.kinkade@gmail.com": "Personal",
+    "ross@trashpanda.capital": "TPC",
+}
 ```
+
+**Task name format:**
+- `reply_needed` → "Reply to [Sender] — [Subject]"
+- `action_required` → "Action: [Sender] — [Subject]"
+- `scheduling` → "Schedule: [Sender] — [Subject]"
+- Other → "[Sender]: [Subject]"
+
+**Row payload:**
+```json
+{
+  "rows": [{
+    "cells": [
+      {"column": "Name", "value": "[prefix] [Sender] — [Subject]"},
+      {"column": "Source", "value": "Email from [Sender]"},
+      {"column": "Due date", "value": "YYYY-MM-DD"},
+      {"column": "Notes", "value": "Priority: [H/M/L] | Intent: [intent]\nAccount: [email]\nReasons: [list]\n\nClassified by RossOS Email Intelligence"},
+      {"column": "Status", "value": "Inbox"},
+      {"column": "Context", "value": "[mapped context]"},
+      {"column": "Email account", "value": "[sync_account]"},
+      {"column": "Thread ID link", "value": "[gmail_link]"}
+    ]
+  }]
+}
+```
+
+**IMPORTANT: Status must be "Inbox" (not "New").** Context must be one of the valid select options: Personal, Asteria Air, Asteria Partners, Social Intel, TPC, Bot suggestion.
 
 **Due date inference:**
 - Mentions specific date → use that date
@@ -185,12 +244,9 @@ curl -s -X POST "https://coda.io/apis/v1/docs/nSMMjxb_b2/tables/grid-7IWNsZiHzE/
 - "next week" → next Monday
 - No deadline mentioned → tomorrow (default for action items)
 
-**Task name prefixes:**
-- `[ACTION]` for action_required
-- `[REPLY]` for reply_needed
-- `[SCHEDULE]` for scheduling
+**Cap:** Do not create more than `email_max_tasks_per_run` tasks per run.
 
-### Step 6: Build Notification (if needed)
+### Step 7: Build Notification (if needed)
 
 Only notify if there are High-priority items. Respect quiet hours.
 
@@ -214,7 +270,7 @@ TOTAL PROCESSED: [N] across [accounts]
 
 If no high-priority items, end silently (no notification).
 
-### Step 7: Log Completion
+### Step 8: Log Completion
 
 ```bash
 curl -s -X PATCH "${SUPABASE_URL}/rest/v1/agent_logs?id=eq.${LOG_ID}" \
@@ -238,7 +294,7 @@ curl -s -X PATCH "${SUPABASE_URL}/rest/v1/agent_logs?id=eq.${LOG_ID}" \
   }"
 ```
 
-### Step 8: Store Memory Entry
+### Step 9: Store Memory Entry
 
 ```
 "Ross OS: Email monitor ran at [time]. Processed [N] emails across [accounts].
