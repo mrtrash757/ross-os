@@ -263,26 +263,29 @@ for email in emails:
 
 print(f"  After filtering: {len(inbox_emails)} inbox emails (excluded self-sent)")
 
-# ── 6b. Thread dedup: group by normalized subject, keep latest ─────
-def normalize_subject(subj):
-    """Strip Re:/Fwd:/RE: prefixes and whitespace for thread grouping."""
-    s = re.sub(r'^(Re:\s*|RE:\s*|Fwd:\s*|FW:\s*|Fw:\s*)+', '', subj, flags=re.IGNORECASE).strip()
+# ── 6b. Thread dedup: group by Thread column (Coda grouping), keep latest ──
+def normalize_thread(thread_val, subject):
+    """Normalize thread key: use Thread column if present, fall back to subject.
+    Strip Re:/Fwd: prefixes and lowercase for consistent grouping."""
+    raw = thread_val if thread_val else subject
+    s = re.sub(r'^(Re:\s*|RE:\s*|Fwd:\s*|FW:\s*|Fw:\s*)+', '', raw, flags=re.IGNORECASE).strip()
     return s.lower()
 
-threads = {}  # normalized_subject+account → latest email
+threads = {}  # normalized_thread+account → latest email
 for email in inbox_emails:
     v = email.get("values", {})
+    thread_col = str(v.get("Thread", "")).strip()
     subject = str(v.get("Subject", ""))
     account = str(v.get("Sync account", ""))
     date = str(v.get("Date", ""))
     
-    thread_key = f"{normalize_subject(subject)}||{account}"
+    thread_key = f"{normalize_thread(thread_col, subject)}||{account}"
     
     if thread_key not in threads or date > str(threads[thread_key].get("values", {}).get("Date", "")):
         threads[thread_key] = email
 
 deduped_emails = list(threads.values())
-print(f"  After thread dedup: {len(deduped_emails)} unique threads")
+print(f"  After thread dedup: {len(deduped_emails)} unique threads (from {len(inbox_emails)} emails)")
 
 # ── 6c. Classify each thread ──────────────────────────────────────
 results = []
