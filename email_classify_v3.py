@@ -241,8 +241,52 @@ def check_contacts(sender_lower):
     return None, None
 
 
-results = []
+# Ross's own email addresses — skip emails sent by Ross himself
+OWN_EMAILS = {v.lower() for v in PROJECT_MAPPING.keys()}
+
+# ── 6a. Pre-filter: INBOX only, skip self-sent ─────────────────────
+inbox_emails = []
 for email in emails:
+    v = email.get("values", {})
+    labels = str(v.get("Labels", ""))
+    sender = str(v.get("From", ""))
+    
+    if "INBOX" not in labels:
+        continue
+    
+    # Skip emails sent by Ross (own replies showing up in inbox)
+    sender_lower = sender.lower()
+    if any(own in sender_lower for own in OWN_EMAILS):
+        continue
+    
+    inbox_emails.append(email)
+
+print(f"  After filtering: {len(inbox_emails)} inbox emails (excluded self-sent)")
+
+# ── 6b. Thread dedup: group by normalized subject, keep latest ─────
+def normalize_subject(subj):
+    """Strip Re:/Fwd:/RE: prefixes and whitespace for thread grouping."""
+    s = re.sub(r'^(Re:\s*|RE:\s*|Fwd:\s*|FW:\s*|Fw:\s*)+', '', subj, flags=re.IGNORECASE).strip()
+    return s.lower()
+
+threads = {}  # normalized_subject+account → latest email
+for email in inbox_emails:
+    v = email.get("values", {})
+    subject = str(v.get("Subject", ""))
+    account = str(v.get("Sync account", ""))
+    date = str(v.get("Date", ""))
+    
+    thread_key = f"{normalize_subject(subject)}||{account}"
+    
+    if thread_key not in threads or date > str(threads[thread_key].get("values", {}).get("Date", "")):
+        threads[thread_key] = email
+
+deduped_emails = list(threads.values())
+print(f"  After thread dedup: {len(deduped_emails)} unique threads")
+
+# ── 6c. Classify each thread ──────────────────────────────────────
+results = []
+for email in deduped_emails:
     v = email.get("values", {})
     labels = str(v.get("Labels", ""))
     sender = str(v.get("From", ""))
@@ -251,10 +295,6 @@ for email in emails:
     account = str(v.get("Sync account", ""))
     link = str(v.get("Link", ""))
     date = str(v.get("Date", ""))
-    
-    # Process anything still in INBOX (read or unread)
-    if "INBOX" not in labels:
-        continue
     
     sender_lower = sender.lower()
     subject_lower = subject.lower()
@@ -274,7 +314,7 @@ for email in emails:
         intent = matched_rule["action"]
         needs_task = matched_rule["needs_task"]
         reasons = [f"Rule: {matched_rule['name']}"]
-        is_newsletter = intent in ("newsletter",)
+        is_newsletter = intent in ("newsletter", "archive")
         entity_override = matched_rule.get("entity", "")
     else:
         # Fallback: contact-based classification
@@ -306,7 +346,11 @@ for email in emails:
     if "unsubscribe" in body_lower:
         is_newsletter = True
     
-    # Dedup check
+    # Archive intent means no task needed
+    if intent == "archive":
+        needs_task = False
+    
+    # Dedup check against existing tasks
     already_has_task = link in existing_threads
     if already_has_task:
         needs_task = False
@@ -350,8 +394,11 @@ print(f"Accounts: {dict(accounts)}")
 print(f"Newsletters: {newsletters}")
 print(f"Tasks to create: {len(tasks)} (max {MAX_TASKS})")
 
+archive_results = [r for r in results if r["intent"] == "archive"]
+active_results = [r for r in results if r["intent"] != "archive"]
+
 for level in ["High", "Medium", "Low"]:
-    level_results = [r for r in results if r["priority"] == level]
+    level_results = [r for r in active_results if r["priority"] == level]
     if level_results:
         print(f"\n--- {level.upper()} PRIORITY ---")
         for r in level_results:
@@ -362,6 +409,15 @@ for level in ["High", "Medium", "Low"]:
             print(f"  [{r['intent'].upper()}]{flag_str} {r['from']}: {r['subject']}")
             if r["reasons"]:
                 print(f"    → {', '.join(r['reasons'])}")
+
+if archive_results:
+    print(f"\n--- ARCHIVE ({len(archive_results)}) ---")
+    for r in archive_results:
+        print(f"  {r['from']}: {r['subject']}")
+        if r["reasons"]:
+            print(f"    → {', '.join(r['reasons'])}")
+
+print(f"\nArchive: {len(archive_results)}  Active: {len(active_results)}")
 
 # Save results (v3 format — also compatible with v2 consumer)
 output = {
