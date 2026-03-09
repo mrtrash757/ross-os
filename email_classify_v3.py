@@ -18,7 +18,8 @@ If no rule matches, falls back to:
   - Default → Medium / fyi
 """
 
-import json, subprocess, re
+import json, re, time
+import requests
 from datetime import datetime
 from collections import Counter
 
@@ -32,22 +33,42 @@ CONTACTS_TABLE = "grid-1M2UOaliIC"
 EMAIL_TASKS_TABLE = "grid-7IWNsZiHzE"
 EMAILS_TABLE = "grid-sync-1004-Email"
 
+CODA_HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
+
 def coda_get(table_id, limit=500):
-    """Fetch rows from Coda table with pagination."""
+    """Fetch rows from Coda table with pagination and retries."""
     all_rows = []
-    url = f"https://coda.io/apis/v1/docs/{DOC}/tables/{table_id}/rows?useColumnNames=true&limit={limit}"
+    url = f"https://coda.io/apis/v1/docs/{DOC}/tables/{table_id}/rows"
+    params = {"useColumnNames": "true", "limit": str(limit)}
     while url:
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "15", url, "-H", f"Authorization: Bearer {TOKEN}"],
-            capture_output=True, text=True
-        )
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            print(f"  ERROR: Failed to parse response from {table_id}")
-            break
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=CODA_HEADERS, params=params, timeout=20)
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get("Retry-After", 5))
+                    print(f"  Rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"  Retry {attempt+1} for {table_id}: {e}")
+                    time.sleep(2)
+                else:
+                    print(f"  ERROR: Failed to fetch {table_id} after 3 attempts: {e}")
+                    return all_rows
         all_rows.extend(data.get("items", []))
-        url = data.get("nextPageLink")
+        next_uri = data.get("nextPageLink")
+        if next_uri:
+            url = next_uri
+            params = {}  # pagination URL includes params
+        else:
+            url = None
     return all_rows
 
 
