@@ -216,21 +216,24 @@ def run():
                 results["workouts_skipped"] += 1
                 continue
 
-            # Link to the Day row via the Days lookup column
-            # The Days column expects the Day row's display value (the date)
-            new_instances.append({"cells": [
+            # Build the instance row with all fields from the template
+            sched_vals = schedule.get("values", {})
+            sched_row_name = schedule.get("name", "")
+            notes = sched_vals.get("Notes", "")
+
+            cells = [
                 {"column": "Name", "value": instance_name},
                 {"column": "Days", "value": today},
                 {"column": "Completed?", "value": False},
-            ]})
-            # Also try to link Workout schedule
-            # The Workout column is a lookup to Workouts table
-            # Set it to the schedule row's display name
-            sched_row_name = schedule.get("name", "")
+            ]
+            # Link to the Workout template
             if sched_row_name:
-                new_instances[-1]["cells"].append(
-                    {"column": "Workout", "value": sched_row_name}
-                )
+                cells.append({"column": "Workout", "value": sched_row_name})
+            # Copy exercise details into Notes so they're visible without clicking through
+            if notes:
+                cells.append({"column": "Notes", "value": notes})
+
+            new_instances.append({"cells": cells})
 
         if new_instances:
             coda_upsert(WORKOUT_INSTANCES_TABLE, new_instances)
