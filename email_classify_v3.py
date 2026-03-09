@@ -252,8 +252,8 @@ for email in emails:
     link = str(v.get("Link", ""))
     date = str(v.get("Date", ""))
     
-    # Only process unread
-    if "UNREAD" not in labels:
+    # Process anything still in INBOX (read or unread)
+    if "INBOX" not in labels:
         continue
     
     sender_lower = sender.lower()
@@ -342,7 +342,7 @@ newsletters = sum(1 for r in results if r["is_newsletter"])
 tasks = [r for r in results if r["needs_task"]]
 
 print(f"\n{'='*80}")
-print(f"EMAIL CLASSIFICATION v3 — {len(results)} unread emails")
+print(f"EMAIL CLASSIFICATION v3 — {len(results)} inbox emails")
 print(f"{'='*80}")
 print(f"\nPriority: High={priorities['High']}  Medium={priorities['Medium']}  Low={priorities['Low']}")
 print(f"Intents: {dict(intents)}")
