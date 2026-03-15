@@ -15,6 +15,8 @@ Sends notification if High or Medium priority emails found.
 import json
 import subprocess
 import sys
+import time
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -26,6 +28,17 @@ TASK_OUTPUT        = "/home/user/workspace/email_tasks_output.json"
 MONITOR_OUTPUT     = "/home/user/workspace/email_monitor_output.json"
 
 TZ = ZoneInfo("America/Detroit")
+
+# ── Coda credentials (for auto-close sweep) ────────────────────────────────────
+CODA_TOKEN = "f8b53a89-6376-486e-85d8-f59fffed59d1"
+CODA_DOC   = "nSMMjxb_b2"
+EMAIL_TASKS_TABLE = "grid-7IWNsZiHzE"
+GMAIL_TABLE       = "grid-sync-1004-Email"
+CODA_BASE  = f"https://coda.io/apis/v1/docs/{CODA_DOC}"
+CODA_HEADERS = {
+    "Authorization": f"Bearer {CODA_TOKEN}",
+    "Content-Type": "application/json",
+}
 
 
 def now_et() -> str:
@@ -152,6 +165,159 @@ def print_summary(classification: dict, tasks: dict) -> None:
     print()
 
 
+# ── Auto-close sweep ────────────────────────────────────────────────────────────
+
+def coda_get_rows(table_id: str, limit: int = 500) -> list[dict]:
+    """Fetch all rows from a Coda table with pagination."""
+    all_rows = []
+    url = f"{CODA_BASE}/tables/{table_id}/rows"
+    params = {"useColumnNames": "true", "limit": str(limit)}
+    while url:
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=CODA_HEADERS, params=params, timeout=20)
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get("Retry-After", 5))
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    print(f"  ❌ Failed to fetch {table_id}: {e}")
+                    return all_rows
+        all_rows.extend(data.get("items", []))
+        next_uri = data.get("nextPageLink")
+        url = next_uri if next_uri else None
+        params = {} if next_uri else params
+    return all_rows
+
+
+def coda_update_row(table_id: str, row_id: str, cells: list[dict]) -> bool:
+    """Update a single Coda row. Returns True on success."""
+    url = f"{CODA_BASE}/tables/{table_id}/rows/{row_id}"
+    body = {"row": {"cells": cells}}
+    for attempt in range(3):
+        try:
+            resp = requests.put(url, headers=CODA_HEADERS, json=body, timeout=15)
+            if resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", 5))
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2)
+            else:
+                print(f"  ❌ Failed to update row {row_id}: {e}")
+                return False
+    return False
+
+
+def _parse_due_date(raw: str) -> datetime | None:
+    """Try to parse a due-date string into a datetime. Returns None on failure."""
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=TZ)
+        except ValueError:
+            continue
+    # Try ISO 8601
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def auto_close_sweep() -> int:
+    """
+    Check all Email Tasks with Status="Inbox".
+    If the task's thread (Thread ID link) is no longer in the Gmail sync table,
+    mark it Done — Ross already handled it.
+
+    PROTECTION: Tasks with a due date in the past (overdue) are skipped.
+    Ross keeps those intentionally as straggler reminders.
+
+    Returns the number of tasks closed.
+    """
+    print()
+    print("🧹 Auto-close sweep: checking for cleaned-out emails...")
+
+    # 1. Get current Gmail inbox threads
+    gmail_rows = coda_get_rows(GMAIL_TABLE)
+    inbox_links = set()
+    for r in gmail_rows:
+        v = r.get("values", {})
+        labels = str(v.get("Labels", ""))
+        link = str(v.get("Link", "")).strip()
+        if "INBOX" in labels and link:
+            inbox_links.add(link)
+    print(f"  📬 Current inbox threads: {len(inbox_links)}")
+
+    # 2. Get all Email Tasks with Status=Inbox
+    all_tasks = coda_get_rows(EMAIL_TASKS_TABLE)
+    inbox_tasks = []
+    for r in all_tasks:
+        v = r.get("values", {})
+        status = str(v.get("Status", "")).strip()
+        if status == "Inbox":
+            inbox_tasks.append(r)
+    print(f"  📋 Open email tasks (Inbox): {len(inbox_tasks)}")
+
+    if not inbox_tasks:
+        print("  ✅ No open tasks to check.")
+        return 0
+
+    # 3. For each Inbox task, check if its thread is still in Gmail inbox
+    today = datetime.now(tz=TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_str = today.strftime("%Y-%m-%d")
+    closed = 0
+    skipped_overdue = 0
+    for task in inbox_tasks:
+        v = task.get("values", {})
+        thread_link = str(v.get("Thread ID link", "")).strip()
+        task_name = str(v.get("Name", ""))[:60]
+        row_id = task.get("id", "")
+        due_raw = v.get("Due date", "")
+
+        # If the thread link is still in the inbox, skip
+        if thread_link and thread_link in inbox_links:
+            continue
+
+        # PROTECTION: Skip overdue tasks — Ross is holding them intentionally
+        due_dt = _parse_due_date(due_raw)
+        if due_dt and due_dt < today:
+            skipped_overdue += 1
+            print(f"  📌 Kept (overdue hold): {task_name}  [due {due_raw}]")
+            continue
+
+        # Thread is gone from inbox — mark as Done
+        success = coda_update_row(
+            EMAIL_TASKS_TABLE,
+            row_id,
+            [
+                {"column": "Status", "value": "Done"},
+                {"column": "Date Completed", "value": today_str},
+            ],
+        )
+        if success:
+            closed += 1
+            print(f"  ✅ Closed: {task_name}")
+        else:
+            print(f"  ❌ Failed to close: {task_name}")
+
+    print(f"  🧹 Auto-closed {closed} tasks (threads no longer in inbox)")
+    if skipped_overdue:
+        print(f"  📌 Skipped {skipped_overdue} overdue tasks (intentional holds)")
+    return closed
+
+
 def main():
     timestamp = now_et()
     all_errors = []
@@ -180,25 +346,12 @@ def main():
     classification_summary, classify_errors = parse_classification(classify_data)
     all_errors.extend(classify_errors)
 
-    # ── Early exit: empty inbox ────────────────────────────────────────────────
-    if classification_summary["total"] == 0 and classify_run["success"]:
-        print("📭 Inbox empty — no emails to classify. Exiting early.")
-        output = {
-            "timestamp": timestamp,
-            "classification": classification_summary,
-            "tasks": {"created": 0, "skipped": 0, "errors": []},
-            "status": "success",
-            "errors": [],
-        }
-        with open(MONITOR_OUTPUT, "w") as f:
-            json.dump(output, f, indent=2)
-        print(f"💾 Output saved to {MONITOR_OUTPUT}")
-        return
-
-    # ── Step 2: Run task creator (only if classifier didn't hard-fail) ─────────
+    # ── Step 2: Run task creator (skip if inbox empty or classifier failed) ────
     task_summary = {"created": 0, "skipped": 0, "errors": []}
 
-    if classify_run["success"]:
+    if classification_summary["total"] == 0 and classify_run["success"]:
+        print("📭 Inbox empty — no new emails to classify.")
+    elif classify_run["success"]:
         task_run = run_script(TASK_SCRIPT)
 
         if not task_run["success"]:
@@ -216,6 +369,13 @@ def main():
     else:
         print("⏭️  Skipping task creation — classifier did not succeed.")
         all_errors.append("Task creation skipped due to classifier failure")
+
+    # ── Step 2.5: Auto-close sweep (ALWAYS runs, even on empty inbox) ─────────
+    # If an email task's thread is no longer in the Gmail inbox, mark it Done.
+    # Ross cleans his inbox — tasks for handled emails should auto-close.
+    # Overdue tasks are protected (Ross holds them as intentional reminders).
+    closed_count = auto_close_sweep()
+    task_summary["auto_closed"] = closed_count
 
     # ── Step 3: Print summary ──────────────────────────────────────────────────
     print_summary(classification_summary, task_summary)
