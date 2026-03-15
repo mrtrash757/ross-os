@@ -32,8 +32,6 @@ HABITS_TABLE = "grid-5WHcBsnbmk"
 HABIT_LOGS_TABLE = "grid-5FJBmY91ko"
 WORKOUTS_TABLE = "grid-kOoUMffFTS"
 WORKOUT_INSTANCES_TABLE = "grid-vEv0-YZI9h"
-PERSONAL_TASKS_TABLE = "grid-G1O2W471aC"
-EMAIL_TASKS_TABLE = "grid-7IWNsZiHzE"
 
 # Timezone — auto-detect EST/EDT
 def get_et_offset():
@@ -97,22 +95,6 @@ def coda_upsert(table_id, rows, key_columns=None):
     return resp.json()
 
 
-def coda_update_row(table_id, row_id, cells):
-    """Update a specific Coda row by ID. Handles rate limits."""
-    import time
-    url = f"{CODA_BASE}/tables/{table_id}/rows/{row_id}"
-    body = {"row": {"cells": cells}}
-    for attempt in range(3):
-        resp = requests.put(url, headers=HEADERS, json=body)
-        if resp.status_code == 429:
-            wait = int(resp.headers.get("Retry-After", 5))
-            print(f"   ⏳ Rate limited, waiting {wait}s...")
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        return resp.json()
-    resp.raise_for_status()
-    return resp.json()
 
 # ── Main Logic ──────────────────────────────────────────────────────────
 def run():
@@ -275,91 +257,14 @@ def run():
         results["errors"].append(err)
         print(f"   ❌ {err}")
 
-    # ── 4. Generate Start of Day Intent ──────────────────────────────
-    print("\n4️⃣  Generating Start of Day Intent...")
-    try:
-        # Gather today's top-priority tasks
-        all_personal_tasks = coda_get(PERSONAL_TASKS_TABLE)
-        tasks_due_today = []
-        for t in all_personal_tasks:
-            v = t.get("values", {})
-            status = str(v.get("Status", ""))
-            if status in ("Done", "Dropped"):
-                continue
-            due = str(v.get("Due date", ""))
-            if today in due:
-                tasks_due_today.append({
-                    "name": v.get("Name", ""),
-                    "priority": v.get("Priority", "Medium"),
-                    "context": v.get("Context", ""),
-                })
-
-        all_email_tasks = coda_get(EMAIL_TASKS_TABLE)
-        email_tasks_today = []
-        for t in all_email_tasks:
-            v = t.get("values", {})
-            status = str(v.get("Status", ""))
-            if status == "Done":
-                continue
-            due = str(v.get("Due date", ""))
-            if today in due:
-                email_tasks_today.append({
-                    "name": v.get("Name", ""),
-                    "contact": v.get("Contact", ""),
-                })
-
-        # Build intent text
-        intent_parts = []
-
-        # Priority tasks first
-        high_tasks = [t for t in tasks_due_today if t["priority"] in ("High", "Critical")]
-        med_tasks = [t for t in tasks_due_today if t["priority"] == "Medium"]
-        low_tasks = [t for t in tasks_due_today if t["priority"] not in ("High", "Critical", "Medium")]
-
-        if high_tasks:
-            intent_parts.append("🔴 " + ", ".join(t["name"] for t in high_tasks[:3]))
-        if med_tasks:
-            intent_parts.append("🟡 " + ", ".join(t["name"] for t in med_tasks[:3]))
-        if email_tasks_today:
-            intent_parts.append(f"📬 {len(email_tasks_today)} email tasks due")
-
-        # Note: workout info already captured in results from step 3
-
-        if not intent_parts:
-            intent_text = f"{dow_full} — Light day. Habits + workouts."
-        else:
-            intent_text = f"{dow_full} focus: " + " | ".join(intent_parts)
-
-        # Write to Day row (by row ID for reliable update)
-        if day_row_id:
-            coda_update_row(DAYS_TABLE, day_row_id, [
-                {"column": "Start of day intent", "value": intent_text},
-            ])
-        else:
-            print("   ⚠️  No Day row ID — cannot write intent")
-
-        results["intent"] = intent_text
-        results["tasks_due_today"] = len(tasks_due_today)
-        results["email_tasks_due_today"] = len(email_tasks_today)
-        print(f"   ✅ Intent: {intent_text}")
-
-    except Exception as e:
-        err = f"Start of day intent: {e}"
-        results["errors"].append(err)
-        print(f"   ❌ {err}")
-
     # ── Summary ─────────────────────────────────────────────────────
     print(f"\n📊 Summary:")
     print(f"   Day row: {'Created' if results['day_row_created'] else 'Existed'}")
     print(f"   Habits: {results['habits_created']} created, {results['habits_skipped']} skipped")
     print(f"   Workouts: {results['workouts_created']} created, {results['workouts_skipped']} skipped")
-    if results.get("intent"):
-        print(f"   Intent: {results['intent']}")
-    if results.get("tasks_due_today"):
-        print(f"   Tasks due: {results['tasks_due_today']} personal + {results.get('email_tasks_due_today', 0)} email")
     if results["errors"]:
         print(f"   ⚠️  Errors: {results['errors']}")
-    print(f"   💤 Sleep & ⚡ Energy: manual entry (fill in on Day row)")
+
 
     # Save results
     out_path = "/home/user/workspace/daily_agenda_output.json"
