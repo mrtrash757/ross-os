@@ -45,6 +45,7 @@ CONTACTS_TABLE       = "grid-1M2UOaliIC"
 HABITS_TABLE         = "grid-5WHcBsnbmk"
 HABIT_LOGS_TABLE     = "grid-5FJBmY91ko"
 SETTINGS_TABLE       = "grid-ybi2tIogls"
+DAYS_TABLE           = "grid-Zm8ylxf9zc"
 
 # ── Timezone ─────────────────────────────────────────────────────────────────
 def _get_et():
@@ -98,6 +99,54 @@ def coda_get(table_id, params=None):
     return all_rows
 
 
+def coda_update_row(table_id, row_id, cells):
+    """Update a specific Coda row by ID."""
+    url = f"{CODA_BASE}/tables/{table_id}/rows/{row_id}"
+    body = {"row": {"cells": cells}}
+    for attempt in range(3):
+        resp = requests.put(url, headers=HEADERS, json=body)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 5))
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return True
+    return False
+
+
+def find_day_row_id(date_str):
+    """Find the Day row ID for a given date string (YYYY-MM-DD)."""
+    rows = coda_get(DAYS_TABLE)
+    for r in rows:
+        if date_str in str(r.get("values", {}).get("Date", "")):
+            return r["id"]
+    return None
+
+
+def generate_intent(dow_full, personal_tasks, email_tasks, todoist_tasks, calendar_events):
+    """Build a Start of day intent string from today's priorities."""
+    parts = []
+
+    # High-priority tasks across all sources
+    high = [t for t in personal_tasks if t.get("priority") in ("High", "Critical")]
+    med  = [t for t in personal_tasks if t.get("priority") == "Medium"]
+
+    if high:
+        parts.append("🔴 " + ", ".join(t["name"][:50] for t in high[:3]))
+    if med:
+        parts.append("🟡 " + ", ".join(t["name"][:50] for t in med[:3]))
+    if email_tasks:
+        parts.append(f"📬 {len(email_tasks)} email tasks")
+    if todoist_tasks:
+        parts.append(f"📝 {len(todoist_tasks)} work tasks")
+    if calendar_events:
+        parts.append(f"📅 {len(calendar_events)} meetings")
+
+    if not parts:
+        return f"{dow_full} — Light day. Habits + workouts."
+    return f"{dow_full} focus: " + " | ".join(parts)
+
+
 def read_settings(rows):
     """Build a key→value dict from the Settings table rows."""
     settings = {}
@@ -116,7 +165,7 @@ def load_calendar(path):
     """
     Load calendar events from a JSON file written by the cron agent.
     Returns a list of event dicts sorted by start time.
-    The file may be a list of events directly, or {"events": [...]} wrapper.
+    The file may be a list of events directly, or {\"events\": [...]} wrapper.
     """
     if not path or not os.path.isfile(path):
         return []
@@ -630,6 +679,34 @@ def build_habits_html(habit_summary, yesterday):
     return "\n".join(rows)
 
 
+def build_sleep_energy_prompt_html():
+    """Build a Sleep/Energy reply prompt section for the morning brief email."""
+    return f"""
+<p style="margin:0 0 12px 0; {FONT} font-size:14px; color:{C_TEXT};">
+  Reply to this email with your sleep and energy to log it automatically:
+</p>
+<div style="background:#f3f4f6; border-radius:6px; padding:12px 16px; margin:0 0 8px 0;
+            border-left:3px solid #2563eb;">
+  <code style="{FONT} font-size:14px; color:#1e3a5f;">Sleep: 7h &nbsp;&nbsp; Energy: High</code>
+</div>
+<p style="margin:0; {FONT} font-size:12px; color:{C_MUTED};">
+  Energy options: Low, Medium, High &nbsp;|&nbsp; Sleep: any format (7h, 7.5 hours, etc.)
+</p>
+"""
+
+
+def build_intent_html(intent_text):
+    """Build a Today's Focus section showing the auto-generated intent."""
+    return f"""
+<div style="background:linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border-radius:6px; padding:14px 18px; border-left:3px solid #2563eb;">
+  <p style="margin:0; {FONT} font-size:15px; font-weight:600; color:#1e3a5f;">
+    {intent_text}
+  </p>
+</div>
+"""
+
+
 def build_html(
     date_str,
     dow_full,
@@ -641,11 +718,14 @@ def build_html(
     habit_summary,
     yesterday,
     generated_at,
+    intent_text="",
 ):
     cal_html     = build_calendar_html(calendar_events)
     tasks_html   = build_tasks_html(personal_tasks, email_tasks, todoist_tasks)
     stale_html   = build_stale_contacts_html(stale_contacts)
     habits_html  = build_habits_html(habit_summary, yesterday)
+    intent_html  = build_intent_html(intent_text) if intent_text else _empty("No priorities set.")
+    sleep_html   = build_sleep_energy_prompt_html()
 
     # Header greeting
     dow_display  = f"{dow_full}, {date_str}"
@@ -702,10 +782,12 @@ def build_html(
   <div style="max-width:680px; margin:0 auto; padding:20px 16px; {FONT}">
     {header_html}
     <div style="height:20px;"></div>
+    {_section("Today's Focus", intent_html, "🎯")}
     {_section("Today's Schedule", cal_html, "📅")}
     {_section("Open Tasks", tasks_html, "✅")}
     {_section("Stale Contacts", stale_html, "👥")}
     {_section("Habits — Yesterday", habits_html, "🔥")}
+    {_section("Log Sleep & Energy", sleep_html, "💤")}
     {footer_html}
   </div>
 </body>
@@ -828,8 +910,28 @@ def run(calendar_file=None):
     total_count = len(habit_summary)
     print(f"   {done_count}/{total_count} habits kept yesterday ({yesterday})", file=sys.stderr)
 
-    # ── 6. Build HTML ─────────────────────────────────────────────────
-    print("\n6️⃣  Building email…", file=sys.stderr)
+    # ── 6. Generate intent + write to Day row ───────────────────────
+    print("\n6️⃣  Generating intent + writing to Day row…", file=sys.stderr)
+    intent_text = ""
+    try:
+        intent_text = generate_intent(
+            dow_full, personal_tasks, email_tasks, todoist_tasks, calendar_events
+        )
+        print(f"   Intent: {intent_text}", file=sys.stderr)
+
+        day_row_id = find_day_row_id(date_str)
+        if day_row_id:
+            coda_update_row(DAYS_TABLE, day_row_id, [
+                {"column": "Start of day intent", "value": intent_text},
+            ])
+            print(f"   ✅ Intent written to Day row {day_row_id}", file=sys.stderr)
+        else:
+            print(f"   ⚠️  No Day row found for {date_str} — intent not saved", file=sys.stderr)
+    except Exception as e:
+        print(f"   ❌ Intent error: {e}", file=sys.stderr)
+
+    # ── 7. Build HTML ─────────────────────────────────────────────────
+    print("\n7️⃣  Building email…", file=sys.stderr)
     html = build_html(
         date_str        = date_str,
         dow_full        = dow_full,
@@ -841,12 +943,13 @@ def run(calendar_file=None):
         habit_summary   = habit_summary,
         yesterday       = yesterday,
         generated_at    = generated,
+        intent_text     = intent_text,
     )
 
-    # ── 7. Print HTML to stdout ───────────────────────────────────────
+    # ── 8. Print HTML to stdout ───────────────────────────────────────
     print(html)
 
-    # ── 8. Save JSON summary ──────────────────────────────────────────
+    # ── 9. Save JSON summary ──────────────────────────────────────────
     out_path = "/home/user/workspace/morning_brief_output.json"
     summary  = build_json_summary(
         date_str        = date_str,
