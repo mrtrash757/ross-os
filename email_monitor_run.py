@@ -165,6 +165,161 @@ def print_summary(classification: dict, tasks: dict) -> None:
     print()
 
 
+# ── Days table helpers ────────────────────────────────────────────────────────
+DAYS_TABLE = "grid-Zm8ylxf9zc"
+PERSONAL_TASKS_TABLE = "grid-G1O2W471aC"
+
+
+# ── Sleep/Energy reply parser ─────────────────────────────────────────────────
+
+def parse_sleep_energy_reply() -> dict:
+    """
+    Check the Gmail sync table for replies to the Morning Brief email
+    that contain Sleep/Energy data. Parse and write to the Day row.
+
+    Returns dict with parsed values or empty dict if nothing found.
+    """
+    import re as _re
+
+    print()
+    print("💤 Sleep/Energy: checking for Morning Brief replies...")
+
+    today_str = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+
+    # 1. Get Gmail sync table rows
+    gmail_rows = coda_get_rows(GMAIL_TABLE)
+
+    # 2. Find replies to Morning Brief from Ross today
+    candidates = []
+    for r in gmail_rows:
+        v = r.get("values", {})
+        sender = str(v.get("From", "")).lower()
+        subject = str(v.get("Subject", "")).lower()
+        date = str(v.get("Date", ""))
+        body = str(v.get("Text", ""))
+
+        # Must be from Ross, subject contains morning brief, sent today
+        if ("ross" in sender
+            and ("morning brief" in subject or ("re:" in subject and "brief" in subject))
+            and today_str in date):
+            candidates.append({"body": body, "date": date})
+
+    if not candidates:
+        print("  No Morning Brief replies found today.")
+        return {}
+
+    # Sort by date descending, use the most recent reply
+    candidates.sort(key=lambda x: x["date"], reverse=True)
+    reply_body = candidates[0]["body"]
+    print(f"  Found reply ({len(candidates)} total), parsing...")
+
+    # 3. Parse Sleep and Energy from the reply
+    result = {}
+
+    # Sleep: match patterns like "Sleep: 7h", "sleep: 7.5 hours", "sleep 7h", "Sleep: 7"
+    sleep_match = _re.search(
+        r'sleep[:\s]+([\d.]+)\s*(h(?:ours?)?|hrs?)?',
+        reply_body, _re.IGNORECASE
+    )
+    if sleep_match:
+        result["sleep"] = sleep_match.group(1) + "h"
+
+    # Energy: match "Energy: High", "energy high", "Energy: Med", etc.
+    energy_match = _re.search(
+        r'energy[:\s]+(low|medium|med|high)',
+        reply_body, _re.IGNORECASE
+    )
+    if energy_match:
+        raw = energy_match.group(1).strip().lower()
+        energy_map = {"low": "Low", "medium": "Medium", "med": "Medium", "high": "High"}
+        result["energy"] = energy_map.get(raw, "Medium")
+
+    if not result:
+        print("  Reply found but couldn\'t parse Sleep/Energy values.")
+        return {}
+
+    print(f"  Parsed: {result}")
+
+    # 4. Find today's Day row and update
+    day_rows = coda_get_rows(DAYS_TABLE)
+    day_row_id = None
+    for r in day_rows:
+        if today_str in str(r.get("values", {}).get("Date", "")):
+            day_row_id = r["id"]
+            break
+
+    if not day_row_id:
+        print(f"  ⚠️  No Day row found for {today_str}")
+        return result
+
+    cells = []
+    if "sleep" in result:
+        cells.append({"column": "Sleep", "value": result["sleep"]})
+    if "energy" in result:
+        cells.append({"column": "Energy", "value": result["energy"]})
+
+    if cells:
+        success = coda_update_row(DAYS_TABLE, day_row_id, cells)
+        if success:
+            print(f"  ✅ Day row updated: {result}")
+        else:
+            print(f"  ❌ Failed to update Day row")
+
+    return result
+
+
+# ── Completion date stamp sweep ───────────────────────────────────────────────
+
+def stamp_completion_dates() -> int:
+    """
+    Find tasks with Status=Done but no completion date, and stamp today's date.
+    Covers both Personal Tasks (Completed at) and Email Tasks (Date Completed).
+    Returns total tasks stamped.
+    """
+    print()
+    print("📅 Completion date sweep: stamping Done tasks missing dates...")
+    today_str = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+    stamped = 0
+
+    # Personal Tasks: Status=Done, Completed at is empty
+    personal_rows = coda_get_rows(PERSONAL_TASKS_TABLE)
+    for r in personal_rows:
+        v = r.get("values", {})
+        status = str(v.get("Status", "")).strip()
+        completed_at = str(v.get("Completed at", "")).strip()
+        if status == "Done" and not completed_at:
+            name = str(v.get("Name", ""))[:60]
+            success = coda_update_row(
+                PERSONAL_TASKS_TABLE, r["id"],
+                [{"column": "Completed at", "value": today_str}]
+            )
+            if success:
+                stamped += 1
+                print(f"  ✅ Stamped personal: {name}")
+
+    # Email Tasks: Status=Done, Date Completed is empty
+    email_rows = coda_get_rows(EMAIL_TASKS_TABLE)
+    for r in email_rows:
+        v = r.get("values", {})
+        status = str(v.get("Status", "")).strip()
+        date_completed = str(v.get("Date Completed", "")).strip()
+        if status == "Done" and not date_completed:
+            name = str(v.get("Name", ""))[:60]
+            success = coda_update_row(
+                EMAIL_TASKS_TABLE, r["id"],
+                [{"column": "Date Completed", "value": today_str}]
+            )
+            if success:
+                stamped += 1
+                print(f"  ✅ Stamped email: {name}")
+
+    if stamped == 0:
+        print("  ✅ All Done tasks already have completion dates.")
+    else:
+        print(f"  📅 Stamped {stamped} tasks with today\'s date")
+    return stamped
+
+
 # ── Auto-close sweep ────────────────────────────────────────────────────────────
 
 def coda_get_rows(table_id: str, limit: int = 500) -> list[dict]:
@@ -376,6 +531,17 @@ def main():
     # Overdue tasks are protected (Ross holds them as intentional reminders).
     closed_count = auto_close_sweep()
     task_summary["auto_closed"] = closed_count
+
+    # ── Step 2.6: Completion date stamp ────────────────────────────────────────
+    # Stamp today's date on Done tasks that are missing a completion date.
+    stamped_count = stamp_completion_dates()
+    task_summary["completion_dates_stamped"] = stamped_count
+
+    # ── Step 2.7: Sleep/Energy from Morning Brief reply ────────────────────────
+    # Check if Ross replied to the morning brief with Sleep/Energy data.
+    sleep_energy = parse_sleep_energy_reply()
+    if sleep_energy:
+        task_summary["sleep_energy_logged"] = sleep_energy
 
     # ── Step 3: Print summary ──────────────────────────────────────────────────
     print_summary(classification_summary, task_summary)
