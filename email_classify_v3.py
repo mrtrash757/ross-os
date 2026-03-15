@@ -110,6 +110,7 @@ rules_by_type = {
     "Body keyword": [],
     "Superhuman label": [],
     "Label": [],
+    "Sender+Subject exclude": [],
 }
 
 for r in rules_raw:
@@ -180,8 +181,22 @@ print(f"  {len(emails)} emails")
 def match_rules(sender_lower, domain, labels_str, subject_lower, body_lower):
     """
     Try to match email against rules. Returns first matching rule or None.
-    Evaluation order: Sender > Domain > Superhuman label > Label > Subject keyword > Body keyword
+    Evaluation order:
+      Sender+Subject exclude (highest) > Sender > Domain > Superhuman label > Label > Subject keyword > Body keyword
     """
+    # Sender+Subject exclude rules — checked FIRST to override sender rules.
+    # Pattern format: "sender|keyword1|keyword2|..."  →  if sender matches AND
+    # subject contains any keyword, force Low priority / no task.
+    for rule in rules_by_type["Sender+Subject exclude"]:
+        parts = rule["pattern"].split("|")
+        if len(parts) < 2:
+            continue
+        sender_pat = parts[0].strip()
+        keywords = [k.strip() for k in parts[1:] if k.strip()]
+        if sender_pat in sender_lower:
+            if any(kw in subject_lower for kw in keywords):
+                return rule
+
     # Sender rules
     for rule in rules_by_type["Sender"]:
         if rule["pattern"] in sender_lower:
