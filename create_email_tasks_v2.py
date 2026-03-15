@@ -21,7 +21,6 @@ DOC   = "nSMMjxb_b2"
 # ── Table IDs ────────────────────────────────────────────────────────
 SETTINGS_TABLE    = "grid-ybi2tIogls"
 EMAIL_TASKS_TABLE = "grid-7IWNsZiHzE"
-CONTACTS_TABLE    = "grid-1M2UOaliIC"
 PROJECTS_TABLE    = "grid-fRBsFa2OZx"
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -161,19 +160,7 @@ for t in existing_tasks_raw:
 print(f"  {len(existing_threads)} existing task threads found")
 
 
-# ── 4. Load Contacts ─────────────────────────────────────────────────
-print("👤 Loading contacts...")
-contacts_raw = coda_get(CONTACTS_TABLE)
-contacts = []  # list of (name_lower, display_name)
-for c in contacts_raw:
-    v = c.get("values", {})
-    name = v.get("Name", "").strip()
-    if name:
-        contacts.append((name.lower(), name))
-print(f"  {len(contacts)} contacts loaded")
-
-
-# ── 5. Load Projects Table (for lookup mapping) ───────────────────────
+# ── 4. Load Projects Table (for lookup mapping) ───────────────────────
 print("📁 Loading projects table...")
 projects_raw = coda_get(PROJECTS_TABLE)
 # Build mapping: project name (lower) → display name
@@ -236,27 +223,7 @@ if len(task_candidates) > max_tasks:
     task_candidates = task_candidates[:max_tasks]
 
 
-# ── 8. Helper: fuzzy contact match ───────────────────────────────────
-def find_contact(sender: str) -> str:
-    """
-    Fuzzy match sender string against contacts.
-    Returns the contact's display name if matched, else empty string.
-    Checks if contact name appears in sender or sender appears in contact name.
-    """
-    sender_lower = sender.lower()
-    for name_lower, display_name in contacts:
-        if name_lower in sender_lower or sender_lower in name_lower:
-            return display_name
-        # Also try matching just words: e.g. "Chase Martin" vs "chase.martin@..."
-        name_parts = name_lower.split()
-        if len(name_parts) >= 2:
-            first, last = name_parts[0], name_parts[-1]
-            if first in sender_lower and last in sender_lower:
-                return display_name
-    return ""
-
-
-# ── 9. Helper: map project string to Projects Table name ─────────────
+# ── 8. Helper: map project string to Projects Table name ─────────────
 def resolve_project(project_str: str) -> str:
     """
     Map the project/entity from classification to a Projects Table row name.
@@ -309,14 +276,7 @@ for idx, email in enumerate(task_candidates, 1):
     if not link:
         print(f"  ⚠️  No thread link — creating task without dedup key")
 
-    # ── 10b. Contact lookup ──────────────────────────────────────────
-    contact_name = find_contact(sender)
-    if contact_name:
-        print(f"  👤 Matched contact: {contact_name}")
-    else:
-        print(f"  👤 No contact match for: {sender}")
-
-    # ── 10c. Project resolution ──────────────────────────────────────
+    # ── 10b. Project resolution ──────────────────────────────────────
     resolved_project = resolve_project(project)
     print(f"  📁 Project: {resolved_project} (from: {project!r})")
 
@@ -344,7 +304,6 @@ for idx, email in enumerate(task_candidates, 1):
         "Status": "Inbox",
         "Source": "Email Monitor",
         "Due date": due_date,
-        "Day": today_str,
         "Email account": account,
         "Thread ID link": link,
         "Notes": notes_content,
@@ -354,11 +313,7 @@ for idx, email in enumerate(task_candidates, 1):
     if resolved_project:
         row_data["Projects Table"] = resolved_project
 
-    # Only set Contact if we found a match
-    if contact_name:
-        row_data["Contact"] = contact_name
-
-    # ── 10g. Write to Coda ───────────────────────────────────────────
+    # ── 10c. Write to Coda ───────────────────────────────────────────
     success = coda_upsert(EMAIL_TASKS_TABLE, row_data)
     if success:
         print(f"  ✅ Task created: {task_name}")
@@ -372,7 +327,7 @@ for idx, email in enumerate(task_candidates, 1):
             "priority": priority,
             "intent": intent,
             "project": resolved_project,
-            "contact": contact_name,
+
         })
     else:
         print(f"  ❌ Failed to create task for: {task_name}")
@@ -396,8 +351,7 @@ if created_tasks:
     print(f"\nCreated tasks:")
     for t in created_tasks:
         print(f"  • [{t['priority']}] {t['name']}")
-        if t["contact"]:
-            print(f"    Contact: {t['contact']}")
+
 
 
 # ── 12. Write output JSON ─────────────────────────────────────────────

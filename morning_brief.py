@@ -13,7 +13,6 @@ Data pulled from Coda:
   - Personal Tasks      (grid-G1O2W471aC)
   - Email-linked Tasks  (grid-7IWNsZiHzE)
   - Todoist Tasks       (grid-sync-48345-Task)
-  - Contacts            (grid-1M2UOaliIC)
   - Habits              (grid-5WHcBsnbmk)
   - Habit Logs          (grid-5FJBmY91ko)
   - Settings            (grid-ybi2tIogls)
@@ -41,7 +40,6 @@ HEADERS    = {
 PERSONAL_TASKS_TABLE = "grid-G1O2W471aC"
 EMAIL_TASKS_TABLE    = "grid-7IWNsZiHzE"
 TODOIST_TABLE        = "grid-sync-48345-Task"
-CONTACTS_TABLE       = "grid-1M2UOaliIC"
 HABITS_TABLE         = "grid-5WHcBsnbmk"
 HABIT_LOGS_TABLE     = "grid-5FJBmY91ko"
 SETTINGS_TABLE       = "grid-ybi2tIogls"
@@ -307,7 +305,6 @@ def fetch_email_tasks():
         name     = str(v.get("Name", "") or v.get("Task", "")).strip()
         priority = str(v.get("Priority", "")).strip()
         due      = str(v.get("Due date", "") or v.get("Due Date", "") or v.get("Due", "")).strip()
-        contact  = str(v.get("Contact", "")).strip()
         if not name:
             continue
         tasks.append({
@@ -315,7 +312,6 @@ def fetch_email_tasks():
             "name":     name,
             "priority": priority or "None",
             "due":      due,
-            "contact":  contact,
             "status":   str(v.get("Status", "")).strip(),
         })
     return tasks
@@ -349,61 +345,6 @@ def fetch_todoist_tasks():
             "labels":   labels,
         })
     return tasks
-
-
-# ── Contacts ──────────────────────────────────────────────────────────────────
-
-def fetch_stale_contacts(stale_days=7):
-    """
-    Return contacts with Last interaction > stale_days ago.
-    Only include Importance = High or Medium.
-    """
-    print("   Fetching Contacts…", file=sys.stderr)
-    rows  = coda_get(CONTACTS_TABLE)
-    today = now_et().replace(hour=0, minute=0, second=0, microsecond=0)
-    stale = []
-    for row in rows:
-        v          = row.get("values", {})
-        importance = str(v.get("Importance", "")).strip()
-        if importance not in ("High", "Med", "Medium"):
-            continue
-        name = str(v.get("Name", "") or v.get("Full Name", "")).strip()
-        if not name:
-            continue
-        last_raw = str(v.get("Last interaction date", "") or v.get("Last interaction", "") or v.get("Last Interaction", "")).strip()
-        if not last_raw:
-            continue
-        # Parse the date
-        last_dt = None
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-                    "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d"):
-            try:
-                if "T" in last_raw:
-                    last_dt = datetime.fromisoformat(
-                        last_raw.replace("Z", "+00:00")
-                    ).astimezone(ET).replace(tzinfo=None)
-                else:
-                    last_dt = datetime.strptime(last_raw[:10], "%Y-%m-%d")
-                break
-            except Exception:
-                continue
-        if last_dt is None:
-            continue
-        today_naive = today.replace(tzinfo=None)
-        days_since  = (today_naive - last_dt).days
-        if days_since < stale_days:
-            continue
-        org = str(v.get("Company", "") or v.get("Organization", "") or v.get("Org", "")).strip()
-        stale.append({
-            "name":        name,
-            "org":         org,
-            "importance":  importance,
-            "days_since":  days_since,
-            "last_date":   last_raw[:10] if len(last_raw) >= 10 else last_raw,
-        })
-    # Sort by days since (most stale first)
-    stale.sort(key=lambda c: c["days_since"], reverse=True)
-    return stale
 
 
 # ── Habits ────────────────────────────────────────────────────────────────────
@@ -560,8 +501,6 @@ def _task_row(task, show_source=False):
         meta_parts.append(f'Due {due}')
     if task.get("project"):
         meta_parts.append(task["project"])
-    if task.get("contact"):
-        meta_parts.append(task["contact"])
     if task.get("labels"):
         meta_parts.append(task["labels"])
     meta_html = (
@@ -610,36 +549,6 @@ def build_tasks_html(personal, email, todoist):
         f'{total} active tasks — {p_cnt} personal · {e_cnt} email · {td_cnt} Todoist</p>'
     )
     return "\n".join(html)
-
-
-def build_stale_contacts_html(stale_contacts):
-    if not stale_contacts:
-        return _empty("No stale contacts. Network is fresh. ✅")
-    rows = []
-    for c in stale_contacts:
-        importance_color = C_HIGH if c["importance"] == "High" else C_MEDIUM
-        org_part = f' <span style="color:{C_MUTED}; font-size:12px;">@ {c["org"]}</span>' if c["org"] else ""
-        rows.append(
-            f'<div style="display:flex; align-items:baseline; justify-content:space-between; '
-            f'            padding:7px 0; border-bottom:1px solid {C_BORDER};">'
-            f'  <span style="{FONT} font-size:14px; color:{C_TEXT}; font-weight:500;">'
-            f'{c["name"]}{org_part}</span>'
-            f'  <span style="white-space:nowrap;">'
-            f'    <span style="background:{importance_color}; color:#fff; font-size:11px; '
-            f'           font-weight:600; padding:2px 6px; border-radius:10px; '
-            f'           {FONT} margin-right:8px;">{c["importance"]}</span>'
-            f'    <span style="{FONT} font-size:13px; color:{C_MUTED};">'
-            f'      {c["days_since"]}d ago</span>'
-            f'  </span>'
-            f'</div>'
-        )
-    count = len(stale_contacts)
-    high  = sum(1 for c in stale_contacts if c["importance"] == "High")
-    rows.append(
-        f'<p style="{FONT} font-size:12px; color:{C_MUTED}; margin:12px 0 0 0;">'
-        f'{count} stale contacts — {high} high importance</p>'
-    )
-    return "\n".join(rows)
 
 
 def build_habits_html(habit_summary, yesterday):
@@ -714,7 +623,6 @@ def build_html(
     personal_tasks,
     email_tasks,
     todoist_tasks,
-    stale_contacts,
     habit_summary,
     yesterday,
     generated_at,
@@ -722,7 +630,6 @@ def build_html(
 ):
     cal_html     = build_calendar_html(calendar_events)
     tasks_html   = build_tasks_html(personal_tasks, email_tasks, todoist_tasks)
-    stale_html   = build_stale_contacts_html(stale_contacts)
     habits_html  = build_habits_html(habit_summary, yesterday)
     intent_html  = build_intent_html(intent_text) if intent_text else _empty("No priorities set.")
     sleep_html   = build_sleep_energy_prompt_html()
@@ -731,7 +638,6 @@ def build_html(
     dow_display  = f"{dow_full}, {date_str}"
     total_events = len(calendar_events)
     total_tasks  = len(personal_tasks) + len(email_tasks) + len(todoist_tasks)
-    total_stale  = len(stale_contacts)
     habits_done  = sum(1 for h in habit_summary if h["completed"] is True)
     habits_total = len(habit_summary)
 
@@ -752,10 +658,6 @@ def build_html(
     <div style="background:rgba(255,255,255,0.15); border-radius:6px; padding:8px 14px;">
       <span style="{FONT} font-size:12px; color:rgba(255,255,255,0.7);">Open Tasks</span><br>
       <span style="{FONT} font-size:18px; font-weight:700; color:#fff;">{total_tasks}</span>
-    </div>
-    <div style="background:rgba(255,255,255,0.15); border-radius:6px; padding:8px 14px;">
-      <span style="{FONT} font-size:12px; color:rgba(255,255,255,0.7);">Stale Contacts</span><br>
-      <span style="{FONT} font-size:18px; font-weight:700; color:#fff;">{total_stale}</span>
     </div>
     <div style="background:rgba(255,255,255,0.15); border-radius:6px; padding:8px 14px;">
       <span style="{FONT} font-size:12px; color:rgba(255,255,255,0.7);">Habits (Yesterday)</span><br>
@@ -785,7 +687,6 @@ def build_html(
     {_section("Today's Focus", intent_html, "🎯")}
     {_section("Today's Schedule", cal_html, "📅")}
     {_section("Open Tasks", tasks_html, "✅")}
-    {_section("Stale Contacts", stale_html, "👥")}
     {_section("Habits — Yesterday", habits_html, "🔥")}
     {_section("Log Sleep & Energy", sleep_html, "💤")}
     {footer_html}
@@ -803,7 +704,6 @@ def build_json_summary(
     personal_tasks,
     email_tasks,
     todoist_tasks,
-    stale_contacts,
     habit_summary,
 ):
     # Task breakdown by source + priority
@@ -830,7 +730,6 @@ def build_json_summary(
             "email":    breakdown(email_tasks,    "Email"),
             "todoist":  breakdown(todoist_tasks,  "Todoist"),
         },
-        "stale_contacts":   len(stale_contacts),
         "habits_yesterday": {
             "completed": habits_done,
             "total":     habits_total,
@@ -853,11 +752,8 @@ def run(calendar_file=None):
     try:
         settings_rows = coda_get(SETTINGS_TABLE)
         settings      = read_settings(settings_rows)
-        stale_days    = int(settings.get("stale_contact_red_days", "7"))
-        print(f"   stale_contact_red_days = {stale_days}", file=sys.stderr)
     except Exception as e:
         print(f"   ⚠️  Settings error: {e} — using defaults", file=sys.stderr)
-        stale_days = 7
 
     # ── 2. Calendar ─────────────────────────────────────────────────
     print("\n2️⃣  Loading calendar…", file=sys.stderr)
@@ -889,16 +785,7 @@ def run(calendar_file=None):
         file=sys.stderr
     )
 
-    # ── 4. Contacts ───────────────────────────────────────────────────
-    print("\n4️⃣  Checking stale contacts…", file=sys.stderr)
-    try:
-        stale_contacts = fetch_stale_contacts(stale_days)
-    except Exception as e:
-        print(f"   ❌ Contacts error: {e}", file=sys.stderr)
-        stale_contacts = []
-    print(f"   {len(stale_contacts)} stale (>{stale_days}d)", file=sys.stderr)
-
-    # ── 5. Habits ─────────────────────────────────────────────────────
+    # ── 4. Habits ─────────────────────────────────────────────────────
     print("\n5️⃣  Loading habits…", file=sys.stderr)
     try:
         habit_summary, yesterday = fetch_habit_summary()
@@ -939,7 +826,6 @@ def run(calendar_file=None):
         personal_tasks  = personal_tasks,
         email_tasks     = email_tasks,
         todoist_tasks   = todoist_tasks,
-        stale_contacts  = stale_contacts,
         habit_summary   = habit_summary,
         yesterday       = yesterday,
         generated_at    = generated,
@@ -957,14 +843,12 @@ def run(calendar_file=None):
         personal_tasks  = personal_tasks,
         email_tasks     = email_tasks,
         todoist_tasks   = todoist_tasks,
-        stale_contacts  = stale_contacts,
         habit_summary   = habit_summary,
     )
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"\n💾 JSON summary saved to {out_path}", file=sys.stderr)
     print(f"📊 {summary['tasks']['total']} tasks · {summary['calendar_events']} events · "
-          f"{summary['stale_contacts']} stale contacts · "
           f"{summary['habits_yesterday']['completed']}/{summary['habits_yesterday']['total']} habits",
           file=sys.stderr)
 

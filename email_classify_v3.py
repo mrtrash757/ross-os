@@ -13,8 +13,6 @@ Rule evaluation order (first match wins within each tier):
   6. Body keyword rules
 
 If no rule matches, falls back to:
-  - VIP contact check (High importance contacts → High priority)
-  - Known contact check → Medium
   - Default → Medium / fyi
 """
 
@@ -29,7 +27,6 @@ DOC = "nSMMjxb_b2"
 # Table IDs
 SETTINGS_TABLE = "grid-ybi2tIogls"
 EMAIL_RULES_TABLE = "grid-X_l2ntl-AQ"
-CONTACTS_TABLE = "grid-1M2UOaliIC"
 EMAIL_TASKS_TABLE = "grid-7IWNsZiHzE"
 EMAILS_TABLE = "grid-sync-1004-Email"
 
@@ -143,23 +140,7 @@ for mt, rl in rules_by_type.items():
         print(f"    {mt}: {len(rl)}")
 
 
-# ── 3. Load Contacts ────────────────────────────────────────────────
-print("Loading contacts...")
-contacts_raw = coda_get(CONTACTS_TABLE)
-contacts = {}
-for c in contacts_raw:
-    v = c.get("values", {})
-    name = v.get("Name", "").strip()
-    if name:
-        contacts[name.lower()] = {
-            "name": name,
-            "org": v.get("Org", ""),
-            "importance": v.get("Importance", ""),
-        }
-print(f"  {len(contacts)} contacts")
-
-
-# ── 4. Load Existing Tasks (dedup) ──────────────────────────────────
+# ── 3. Load Existing Tasks (dedup) ──────────────────────────────────
 print("Loading existing email tasks...")
 existing_tasks = coda_get(EMAIL_TASKS_TABLE)
 existing_threads = set()
@@ -245,17 +226,6 @@ def match_rules(sender_lower, domain, labels_str, subject_lower, body_lower):
     return None
 
 
-def check_contacts(sender_lower):
-    """Check if sender matches a known contact. Returns (priority, reason) or None."""
-    for cname, cdata in contacts.items():
-        if cname in sender_lower or sender_lower in cname:
-            if cdata["importance"] == "High":
-                return "High", f"VIP contact: {cdata['name']}"
-            else:
-                return "Medium", f"Known contact: {cdata['name']}"
-    return None, None
-
-
 # Ross's own email addresses — skip emails sent by Ross himself
 OWN_EMAILS = {v.lower() for v in PROJECT_MAPPING.keys()}
 
@@ -335,30 +305,13 @@ for email in deduped_emails:
         is_newsletter = intent in ("newsletter", "archive")
         entity_override = matched_rule.get("entity", "")
     else:
-        # Fallback: contact-based classification
+        # Fallback: no rule matched
         priority = "Medium"
         intent = "fyi"
         needs_task = False
         reasons = ["No rule matched"]
         is_newsletter = False
         entity_override = ""
-        
-        contact_priority, contact_reason = check_contacts(sender_lower)
-        if contact_priority:
-            priority = contact_priority
-            reasons = [contact_reason]
-            if contact_priority == "High":
-                # Refine intent based on content
-                text_lower = (subject_lower + " " + body_lower)
-                if any(w in text_lower for w in ["please", "can you", "could you", "need you to"]):
-                    intent = "action_required"
-                    needs_task = True
-                elif "?" in subject or any(w in text_lower for w in ["what do you think", "your thoughts", "let me know"]):
-                    intent = "reply_needed"
-                    needs_task = True
-                else:
-                    intent = "fyi"
-                    needs_task = True
     
     # Detect newsletter from unsubscribe link
     if "unsubscribe" in body_lower:
